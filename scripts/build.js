@@ -106,6 +106,11 @@ function shell(title, content, { charts = false } = {}) {
     </header>
     
     ${content}
+
+    <footer class="site-footer">
+      <p>&copy; ${new Date().getFullYear()} <span class="footer-name">Shidqie Alvaro</span></p>
+      <p>All rights reserved.</p>
+    </footer>
     
     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js" crossorigin="anonymous"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/contrib/auto-render.min.js" crossorigin="anonymous" onload="renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false});"></script>
