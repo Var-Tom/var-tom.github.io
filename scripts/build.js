@@ -12,6 +12,29 @@ const siteUrl = (pathname) => `${basePath}${pathname.startsWith('/') ? pathname 
 const markdown = new MarkdownIt({ html: true, linkify: true, typographer: true })
   .use(markdownItAttrs);
 
+// Keep LaTeX opaque to Markdown (especially emphasis, escapes, and attributes).
+// KaTeX's browser auto-renderer processes the preserved delimiters afterward.
+markdown.inline.ruler.before('escape', 'math', (state, silent) => {
+  if (state.src[state.pos] !== '$') return false;
+  const delimiter = state.src.startsWith('$$', state.pos) ? '$$' : '$';
+  const start = state.pos + delimiter.length;
+  let end = start;
+  while ((end = state.src.indexOf(delimiter, end)) !== -1 && end < state.posMax) {
+    let backslashes = 0;
+    for (let pos = end - 1; pos >= start && state.src[pos] === '\\'; pos--) backslashes++;
+    if (backslashes % 2 === 0) break;
+    end += delimiter.length;
+  }
+  if (end === -1 || end + delimiter.length > state.posMax || end === start) return false;
+  if (!silent) {
+    const token = state.push('math', '', 0);
+    token.content = state.src.slice(state.pos, end + delimiter.length);
+  }
+  state.pos = end + delimiter.length;
+  return true;
+});
+markdown.renderer.rules.math = (tokens, index) => markdown.utils.escapeHtml(tokens[index].content);
+
 markdown.renderer.rules.fence = (tokens, index) => {
   const token = tokens[index];
   const language = token.info.trim();
@@ -46,9 +69,21 @@ function slugify(value) {
 }
 
 function formatDate(value) {
-  const date = value instanceof Date ? value : new Date(`${value}T00:00:00`);
+  const date = new Date(`${dateKey(value)}T00:00:00Z`);
   if (Number.isNaN(date.getTime())) throw new Error(`Invalid date: ${value}`);
   return new Intl.DateTimeFormat('en', { dateStyle: 'long', timeZone: 'UTC' }).format(date);
+}
+
+function dateKey(value) {
+  if (value instanceof Date) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const day = String(value.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+  const date = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) throw new Error(`Invalid date: ${value}`);
+  return date.toISOString().slice(0, 10);
 }
 
 function shell(title, content, { charts = false } = {}) {
@@ -80,16 +115,17 @@ function shell(title, content, { charts = false } = {}) {
 `;
 }
 
+await fs.mkdir(postsDir, { recursive: true });
 const files = (await fs.readdir(postsDir)).filter((name) => name.endsWith('.md'));
 const posts = [];
 for (const file of files) {
   const source = await fs.readFile(path.join(postsDir, file), 'utf8');
   const { data, content } = matter(source);
-  if (!data.title || !data.date || !['blog', 'project'].includes(data.category)) {
-    throw new Error(`${file} needs title, date, and category (blog or project) front matter.`);
+  if (!data.title || !data.date) {
+    throw new Error(`${file} needs title and date front matter.`);
   }
   const slug = slugify(data.slug || data.title);
-  posts.push({ ...data, slug, content, file });
+  posts.push({ ...data, date: dateKey(data.date), slug, content, file });
 }
 posts.sort((a, b) => b.date.localeCompare(a.date));
 
@@ -99,29 +135,24 @@ await fs.cp(path.join(root, 'style.css'), path.join(outputDir, 'style.css'));
 await fs.writeFile(path.join(outputDir, 'charts.js'), `document.querySelectorAll('.plotly-chart').forEach((element) => {\n  const chart = JSON.parse(element.dataset.chart);\n  Plotly.newPlot(element, chart.data, chart.layout, { responsive: true });\n});\n`);
 
 for (const post of posts) {
-  const postDir = path.join(outputDir, post.category === 'project' ? 'projects' : 'blogs', post.slug);
+  const postDir = path.join(outputDir, 'posts', post.slug);
   await fs.mkdir(postDir, { recursive: true });
   const html = `<main class="article"><p><a href="${siteUrl('/')}">← Home</a></p><article><h1>${escapeHtml(post.title)}</h1><p class="date">${escapeHtml(formatDate(post.date))}</p>${markdown.render(post.content)}</article></main>`;
   const hasCharts = post.content.includes('```plotly');
   await fs.writeFile(path.join(postDir, 'index.html'), shell(post.title, html, { charts: hasCharts }));
 }
 
-const archive = (category) => {
-  const entries = posts.filter((post) => post.category === category);
-  return entries.length
-    ? entries.map((post) => `<div class="post"><a href="${siteUrl(`/${category === 'project' ? 'projects' : 'blogs'}/${post.slug}/`)}">${escapeHtml(post.title)}</a><div class="date">${escapeHtml(formatDate(post.date))}</div></div>`).join('\n')
-    : '<div class="post">Nothing to see here</div>';
-};
+const archive = posts.length
+  ? posts.map((post) => `<div class="post"><a href="${siteUrl(`/posts/${post.slug}/`)}">${escapeHtml(post.title)}</a><div class="date">${escapeHtml(formatDate(post.date))}</div></div>`).join('\n')
+  : '<div class="post"><a href="#">Nothing to see here ( not yet )</a></div>';
 
 let home = await fs.readFile(path.join(root, 'index.html'), 'utf8');
-for (const category of ['project', 'blog']) {
-  const label = category === 'project' ? 'PROJECT' : 'BLOG';
-  const marker = new RegExp(`<!-- ${label}_ARCHIVE_START -->[\\s\\S]*?<!-- ${label}_ARCHIVE_END -->`);
-  if (!marker.test(home)) throw new Error(`index.html is missing the ${category} archive markers.`);
-  home = home.replace(marker, `<!-- ${label}_ARCHIVE_START -->\n        ${archive(category)}\n        <!-- ${label}_ARCHIVE_END -->`);
-}
-home = home.replace('href="style.css"', `href="${siteUrl('/style.css')}"`);
+const marker = /<!-- POST_ARCHIVE_START -->[\s\S]*?<!-- POST_ARCHIVE_END -->/;
+if (!marker.test(home)) throw new Error('index.html is missing the post archive markers.');
+home = home.replace(marker, () => `<!-- POST_ARCHIVE_START -->\n        ${archive}\n        <!-- POST_ARCHIVE_END -->`);
+home = home.replace('href="style.css"', () => `href="${siteUrl('/style.css')}"`);
 home = home.replace('</head>', '    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" crossorigin="anonymous">\n  </head>');
-home = home.replace('</body>', `    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js" crossorigin="anonymous"></script>\n    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/contrib/auto-render.min.js" crossorigin="anonymous" onload="renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false});"></script>\n  </body>`);
+// A callback preserves literal dollar signs in the KaTeX delimiters.
+home = home.replace('</body>', () => `    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js" crossorigin="anonymous"></script>\n    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/contrib/auto-render.min.js" crossorigin="anonymous" onload="renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false});"></script>\n  </body>`);
 await fs.writeFile(path.join(outputDir, 'index.html'), home);
 console.log(`Built ${posts.length} post(s) into dist/.`);
